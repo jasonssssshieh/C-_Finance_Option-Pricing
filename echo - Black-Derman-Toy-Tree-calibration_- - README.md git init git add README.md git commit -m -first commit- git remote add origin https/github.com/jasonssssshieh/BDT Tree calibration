@@ -1,0 +1,169 @@
+//
+//  main.cpp
+//  Black-Derman-Toy Tree calibration
+//
+//  Created by Zijian Xie on 3/10/17.
+//  Copyright © 2017 Jason Xie. All rights reserved.
+//
+
+#include <iostream>
+#include <vector>
+#include <cmath>
+using namespace std;
+
+/*
+ [in]:
+ vector<double> yield_curve        :yield_curve
+ vector<double> volatility_curve   :volatility_curve
+ int N                             :Number of time steps
+ double T                          :Time to Maturity
+
+ */
+
+class BlackDermanToy{
+public:
+    vector<double> yield_curve;
+    vector<double> volatility_curve;
+    int N;
+    double T;
+    BlackDermanToy(vector<double>& yield_curve, vector<double>& volatility_curve, int& N, double& T){
+        this->volatility_curve = volatility_curve;
+        this->yield_curve = yield_curve;
+        this->N = N;
+        this->T = T;
+    }
+    void buildBDT(int w = 20);//w = yield_curve.size()
+};
+
+void BlackDermanToy::buildBDT(int w){
+    vector<vector<double> > r(w, vector<double>(w, 0.0)); //short rate at node i, j
+    vector<double> U(w, 0.0); //median of the (lognormal)
+                                                          //distribution for r at time t
+    double dt = 0.0;
+    vector<double> volR(w, 0.0);//short rate volatiliy
+    vector<double> vol(w, 0.0);//stores calibrated volatility parameters
+    
+    vector<double> P(w, 0.0);//discount bond prices
+    vector<double> Pu(w, 0.0);//price of bond in up movement
+    vector<double> Pd(w, 0.0);//price of bond in down movement
+    
+    vector<vector<double> > Qu(w, vector<double>(w, 0.0));
+    vector<vector<double> > Qd(w, vector<double>(w, 0.0));//state securities (Arrow-Debreu)prices for a down movement
+    vector<vector<double> > d(w, vector<double>(w, 0.0));
+    vector<double> R(w, 0.0);//discount curve rates
+    const double epsilon = 0.0001;//error tolerance level
+    double error, error1, error2 = 0.0;// errors computed in numerical search
+    double error3, error4 = 0.0;// errors computed in numerical search
+    double sum1, sum2 = 0.0; // sums of first derivatives
+    double sum3, sum4 = 0.0; // sums of second derivatives
+    double volSum1, volSum2 = 0.0; // sum of volatilities
+    double sigVal1 = 0.0; // calibrated volatility parameter
+    double sigVal2, sigVal3 = 0.0; // computed volatilities in numerical
+    // search
+    double alpha1 = 0.05; // calibrated U(i) parameter
+    double alpha2 = 0.0; // updated alpha1 (U(i)) parameter
+    double alpha3 = 0.10; // computed U(i) parameter in numerical
+    // search
+    int i, j = 0;
+    // precompute constants – assume one year time step
+    dt = 1;
+    
+    //initialize yield and vol curves
+    for(int i = 1; i <= N; ++i){
+        R[i] = yield_curve[i-1];
+        P[i] = 1/(pow((1+R[i]*dt), i*dt));
+        volR[i] = volatility_curve[i-1];//原来bond的一年之后的vol
+    }
+    //initialize nodes
+    U[0] = R[1];
+    r[0][0] = R[1];
+    d[0][0] = 1/(1+r[0][0]*dt);
+    vol[0] = volR[0];
+    Qu[1][1] = 1;
+    Qd[1][-1] = 1;
+    
+    //compute the Pu[.], Pd[.], using Newton-Raphson Method
+    for(i = 2; i <= N; ++i){
+        sum1 = 0;
+        sum2 = 0;
+        error = 0;
+        alpha1 = 0.92;//初始值
+        
+        do{
+            sum1 = (alpha1 + pow(alpha1, exp(-2*volR[i]*sqrt(dt))))/(1+r[0][0]*dt) - P[i]*2*(1+r[0][0]*dt);
+            sum2 = (1+exp(-2*volR[8]*sqrt(dt))*pow(alpha1, exp(-2*volR[8]*sqrt(dt))-1));
+            alpha2 = alpha1 - sum1/sum2;
+            error = abs(alpha2 - alpha1);
+            alpha1 = alpha2;
+        }while(error >= epsilon);
+        Pu[i] = alpha1;
+        Pd[i] = pow(alpha1,exp(-2*volR[i]*sqrt(dt)));
+    }
+    
+    //evolve tree for the short interest
+    for(i = 1; i < N; ++i){
+        //update the Qu and Qd
+        if(i > 1){
+            for(j = -i+2; j <= i; j += 2){
+                Qu[i][j] = 0.5*Qu[i-1][j-1]*d[i-1][j-1] + 0.5*Qu[i-1][j+1]*d[i-1][j+1];
+            }
+            for(j = i - 2; j >= -i; j -=2){
+                Qd[i][j] = 0.5*Qd[i-1][j-1]*d[i-1][j-1] + 0.5*Qd[i-1][j+1]*d[i-1][j+1];
+            }
+        }
+        //solve simultaneously for U[i] and sig[i]
+        alpha1 = 0.05;
+        sigVal1 = 0.092;
+        
+        do{//因为你有四个方程：u方向的U[i], sigVol[i]，d方向的U[i], sigVol[i]
+            sum1 = 0;
+            sum2 = 0;
+            sum3 = 0;
+            sum4 = 0;
+            volSum1 = 0;
+            volSum2 = 0;
+            for(j = -i; j <= i; j += 2){
+                //u node:
+                sum1 += Qu[i][j] * 1/(1+alpha1*exp(sigVal1 * j * sqrt(dt))*dt);//sum, without Pu[i]
+                sum2 += Qu[i][j] * (dt*exp(sigVal1*j*sqrt(dt)))/pow((1+alpha1*exp(sigVal1 * j * sqrt(dt))*dt),2);//partial differential to U[i], 负号最后再加
+                //partial differential to sigma[i], 负号最后再加
+                volSum1 += Qu[i][j]*(alpha1*dt*j*sqrt(dt)*exp(alpha1*j*sqrt(dt)))/pow((1+alpha1*exp(sigVal1 * j * sqrt(dt))*dt),2);
+                
+                //d node:
+                sum3 += Qd[i][j] * 1/(1+alpha1*exp(sigVal1 * j * sqrt(dt))*dt);
+                sum4 += Qd[i][j] * (dt*exp(sigVal1*j*sqrt(dt)))/pow((1+alpha1*exp(sigVal1 * j * sqrt(dt))*dt),2);
+                volSum2 += Qd[i][j]*(alpha1*dt*j*sqrt(dt)*exp(alpha1*j*sqrt(dt)))/pow((1+alpha1*exp(sigVal1 * j * sqrt(dt))*dt),2);
+            }
+            alpha2 = alpha1 - (sum1 - Pu[i+1])/(-sum2);
+            error = abs(alpha2 - alpha1);
+            alpha1 = alpha2;
+            
+            sigVal2 = sigVal1 - (sum1 - Pu[i+1])/(-volSum1);
+            error1 = abs(sigVal1 - sigVal2);
+            sigVal1 = sigVal2;
+            
+            alpha3 = alpha1 - (sum3 - Pd[i+1])/(-sum4);
+            error3 = abs(alpha3 - alpha1);
+            
+            sigVal3 = sigVal1 - (sum3 - Pd[i+1])/(-volSum2);
+            error4 = abs(sigVal1 - sigVal3);
+        }
+            while((error > epsilon) || (error1 > epsilon)||(error3 > epsilon)||(error4 > epsilon));
+            
+            U[i] = alpha1;
+            vol[i] = sigVal1;
+            
+            //set r[.] and d[.]
+            for(j = -i; j <= i; j +=2){
+                r[i][j] = U[i]*exp(vol[i]*j*sqrt(dt));
+                d[i][j] = 1/(1+r[i][j]*dt);
+            }
+        }
+};
+
+
+int main(int argc, const char * argv[]) {
+    // insert code here...
+    std::cout << "Hello, World!\n";
+    return 0;
+}
